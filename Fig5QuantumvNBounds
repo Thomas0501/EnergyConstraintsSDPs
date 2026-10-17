@@ -1,0 +1,1090 @@
+## Requires "build_vn_quantum_solver" to be stored in "vNEntropy_Quantum_EnergyConstraints"
+
+## Generates Quantum vN bounds for Fig5  
+# Searches for optimal (E_0,E_1) along the boundary using 3 stages of increasing precision
+
+
+
+import numpy as np
+import time
+import csv
+import os
+
+
+from vNEntropy_Quantum_EnergyConstraints import build_vn_quantum_solver
+
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+K_STAGE1 = 8
+K_STAGE2 = 12
+K_STAGE3 = 16
+
+N_STAGE1 = 20
+N_STAGE2 = 4
+N_STAGE3 = 1
+
+# Stay very slightly inside the exact quantum boundary
+# for numerical stability.
+BOUNDARY_MARGIN = 0
+
+# Avoid the exact tips of the curved boundary.
+THETA_MARGIN = 0
+
+
+# ============================================================
+# QUANTUM BOUNDARY
+#
+# Equal energies:
+#
+#     omega0 = omega1 = omega
+#
+# Then
+#
+#     Delta = 4 asin(sqrt(omega))
+#
+# and the + curved boundary is
+#
+#     theta1 = theta0 + Delta
+#
+#     E0 = sin(theta0)
+#     E1 = sin(theta1)
+#
+# We move slightly inside:
+#
+#     theta1 = theta0 + Delta - BOUNDARY_MARGIN
+# ============================================================
+
+def boundary_E1(E0, Delta):
+
+    theta0 = np.arcsin(
+        np.clip(E0, -1.0, 1.0)
+    )
+
+    theta1 = (
+        theta0
+        + Delta
+        - BOUNDARY_MARGIN
+    )
+
+    return np.sin(theta1)
+
+
+# ============================================================
+# SOLVE ONE POINT
+# ============================================================
+
+def solve_point(E0, omega, Delta, k):
+
+    E1 = boundary_E1(
+        E0,
+        Delta
+    )
+
+    E = [
+        float(E0),
+        float(E1)
+    ]
+
+    w = [
+        float(omega),
+        float(omega)
+    ]
+
+    tic = time.time()
+
+    try:
+
+        H = build_vn_quantum_solver(
+            E,
+            w,
+            k
+        )
+
+        H = float(H)
+
+    except Exception as err:
+
+        print()
+        print("    SOLVER FAILED:")
+        print(f"    {err}")
+        print()
+
+        H = np.nan
+
+    elapsed = time.time() - tic
+
+    return E1, H, elapsed
+
+
+# ============================================================
+# FIND BEST POINT AND ITS NEIGHBORING INTERVAL
+#
+# For example, suppose the sampled points are
+#
+#       x1  x2  x3  x4  x5
+#
+# and x3 is best.
+#
+# Then the next stage searches
+#
+#       [x2, x4].
+#
+# If the winner is an endpoint, use the interval between
+# that endpoint and its nearest neighbor.
+# ============================================================
+
+def interval_around_best(
+        E0_values,
+        H_values):
+
+    E0_values = np.asarray(
+        E0_values,
+        dtype=float
+    )
+
+    H_values = np.asarray(
+        H_values,
+        dtype=float
+    )
+
+    valid = np.isfinite(
+        H_values
+    )
+
+    if not np.any(valid):
+
+        raise RuntimeError(
+            "Every optimization in this stage failed."
+        )
+
+    valid_indices = np.where(valid)[0]
+
+    best_valid_position = np.argmax(
+        H_values[valid]
+    )
+
+    best_idx = valid_indices[
+        best_valid_position
+    ]
+
+
+    # ========================================================
+    # Determine local interval for next stage
+    # ========================================================
+
+    if best_idx == 0:
+
+        left = E0_values[0]
+        right = E0_values[1]
+
+    elif best_idx == len(E0_values) - 1:
+
+        left = E0_values[-2]
+        right = E0_values[-1]
+
+    else:
+
+        left = E0_values[
+            best_idx - 1
+        ]
+
+        right = E0_values[
+            best_idx + 1
+        ]
+
+
+    return (
+        best_idx,
+        left,
+        right
+    )
+
+
+# ============================================================
+# SAVE ONE RESULT TO CSV
+# ============================================================
+
+def save_result(
+        output_csv,
+        stage,
+        k,
+        E0,
+        E1,
+        H,
+        elapsed):
+
+    with open(
+        output_csv,
+        "a",
+        newline=""
+    ) as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow([
+            stage,
+            k,
+            E0,
+            E1,
+            H,
+            elapsed
+        ])
+
+
+# ============================================================
+# MAIN OPTIMIZATION
+# ============================================================
+
+def optimize_quantum_vn_fixed_omega(
+        omega,
+        output_csv=None):
+
+    """
+    Three-stage optimization of the quantum-adversary
+    conditional von Neumann entropy for fixed
+
+        omega0 = omega1 = omega.
+
+    Stage 1:
+        20 equally spaced E0 values over the ENTIRE
+        + curved quantum boundary.
+        k = 8.
+
+    Stage 2:
+        5 equally spaced E0 values around the best
+        Stage-1 point.
+        k = 12.
+
+    Stage 3:
+        3 equally spaced E0 values around the best
+        Stage-2 point.
+        k = 16.
+
+    The returned optimum is the best Stage-3 point.
+    """
+
+
+    # ========================================================
+    # DELTA
+    # ========================================================
+
+    Delta = (
+        4.0
+        * np.arcsin(
+            np.sqrt(omega)
+        )
+    )
+
+
+    # ========================================================
+    # FULL + CURVED QUANTUM BOUNDARY
+    #
+    # theta0 ranges from
+    #
+    #   -pi/2
+    #
+    # to
+    #
+    #   pi/2 - Delta.
+    #
+    # We move slightly away from the exact tips.
+    # ========================================================
+
+    theta_min = (
+        -np.pi / 2
+        + THETA_MARGIN
+    )
+
+    theta_max = (
+        np.pi / 2
+        - Delta
+        - THETA_MARGIN
+    )
+
+
+    if theta_max <= theta_min:
+
+        raise ValueError(
+            "The + curved boundary interval is empty "
+            "for this value of omega."
+        )
+
+
+    E0_min = np.sin(
+        theta_min
+    )
+
+    E0_max = np.sin(
+        theta_max
+    )
+
+
+    # ========================================================
+    # OUTPUT FILE
+    # ========================================================
+
+    if output_csv is None:
+
+        output_csv = (
+            f"Quantum_vN_opt_"
+            f"omega_{omega:.6f}.csv"
+        )
+
+
+    # Create fresh CSV
+    with open(
+        output_csv,
+        "w",
+        newline=""
+    ) as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow([
+            "stage",
+            "k",
+            "E0",
+            "E1",
+            "H_vN",
+            "solve_time_seconds"
+        ])
+
+
+    # ========================================================
+    # PRINT GENERAL INFORMATION
+    # ========================================================
+
+    print()
+    print(
+        "========================================================"
+    )
+    print(
+        "QUANTUM-ADVERSARY vN ENTROPY OPTIMIZATION"
+    )
+    print(
+        "========================================================"
+    )
+
+    print(
+        f"omega = {omega:.10f}"
+    )
+
+    print(
+        f"Delta = {Delta:.10f}"
+    )
+
+    print()
+
+    print(
+        "Full Stage-1 + boundary:"
+    )
+
+    print(
+        f"E0_min = {E0_min:+.10f}"
+    )
+
+    print(
+        f"E0_max = {E0_max:+.10f}"
+    )
+
+    print(
+        "========================================================"
+    )
+
+    print()
+
+
+    # ########################################################
+    #
+    # STAGE 1
+    #
+    # 20 POINTS
+    # k = 8
+    #
+    # FULL CURVED BOUNDARY
+    #
+    # ########################################################
+
+
+    E0_stage1 = np.linspace(
+        E0_min,
+        E0_max,
+        N_STAGE1
+    )
+
+    E1_stage1 = []
+    H_stage1 = []
+    time_stage1 = []
+
+
+    print()
+    print(
+        "========================================================"
+    )
+    print(
+        "STAGE 1"
+    )
+    print(
+        "========================================================"
+    )
+    print(
+        f"k = {K_STAGE1}"
+    )
+    print(
+        f"number of points = {N_STAGE1}"
+    )
+    print(
+        "full + curved boundary"
+    )
+    print(
+        "========================================================"
+    )
+    print()
+
+
+    for i, E0 in enumerate(
+            E0_stage1):
+
+
+        E1, H, elapsed = solve_point(
+            E0,
+            omega,
+            Delta,
+            K_STAGE1
+        )
+
+
+        E1_stage1.append(
+            E1
+        )
+
+        H_stage1.append(
+            H
+        )
+
+        time_stage1.append(
+            elapsed
+        )
+
+
+        print(
+            f"[Stage 1: "
+            f"{i+1:02d}/{N_STAGE1:02d}]"
+        )
+
+        print(
+            f"    E0 = {E0:+.10f}"
+        )
+
+        print(
+            f"    E1 = {E1:+.10f}"
+        )
+
+        print(
+            f"    H  = {H:.12f}"
+        )
+
+        print(
+            f"    time = {elapsed:.1f} s"
+        )
+
+        print()
+
+
+        save_result(
+            output_csv,
+            1,
+            K_STAGE1,
+            E0,
+            E1,
+            H,
+            elapsed
+        )
+
+
+    E1_stage1 = np.asarray(
+        E1_stage1
+    )
+
+    H_stage1 = np.asarray(
+        H_stage1
+    )
+
+    time_stage1 = np.asarray(
+        time_stage1
+    )
+
+
+    # ========================================================
+    # BEST STAGE-1 POINT
+    # ========================================================
+
+    best1, left1, right1 = (
+        interval_around_best(
+            E0_stage1,
+            H_stage1
+        )
+    )
+
+
+    print()
+    print(
+        "--------------------------------------------------------"
+    )
+    print(
+        "BEST STAGE-1 POINT"
+    )
+    print(
+        "--------------------------------------------------------"
+    )
+
+    print(
+        f"E0 = "
+        f"{E0_stage1[best1]:+.12f}"
+    )
+
+    print(
+        f"E1 = "
+        f"{E1_stage1[best1]:+.12f}"
+    )
+
+    print(
+        f"H  = "
+        f"{H_stage1[best1]:.12f}"
+    )
+
+    print()
+
+    print(
+        "Stage-2 search interval:"
+    )
+
+    print(
+        f"[{left1:+.12f}, "
+        f"{right1:+.12f}]"
+    )
+
+    print(
+        "--------------------------------------------------------"
+    )
+
+    print()
+
+
+    # ########################################################
+    #
+    # STAGE 2
+    #
+    # 5 POINTS
+    # k = 12
+    #
+    # ########################################################
+
+
+    E0_stage2 = np.linspace(
+        left1,
+        right1,
+        N_STAGE2
+    )
+
+    E1_stage2 = []
+    H_stage2 = []
+    time_stage2 = []
+
+
+    print()
+    print(
+        "========================================================"
+    )
+    print(
+        "STAGE 2"
+    )
+    print(
+        "========================================================"
+    )
+
+    print(
+        f"k = {K_STAGE2}"
+    )
+
+    print(
+        f"number of points = "
+        f"{N_STAGE2}"
+    )
+
+    print(
+        "========================================================"
+    )
+
+    print()
+
+
+    for i, E0 in enumerate(
+            E0_stage2):
+
+
+        E1, H, elapsed = solve_point(
+            E0,
+            omega,
+            Delta,
+            K_STAGE2
+        )
+
+
+        E1_stage2.append(
+            E1
+        )
+
+        H_stage2.append(
+            H
+        )
+
+        time_stage2.append(
+            elapsed
+        )
+
+
+        print(
+            f"[Stage 2: "
+            f"{i+1:02d}/{N_STAGE2:02d}]"
+        )
+
+        print(
+            f"    E0 = {E0:+.12f}"
+        )
+
+        print(
+            f"    E1 = {E1:+.12f}"
+        )
+
+        print(
+            f"    H  = {H:.12f}"
+        )
+
+        print(
+            f"    time = {elapsed:.1f} s"
+        )
+
+        print()
+
+
+        save_result(
+            output_csv,
+            2,
+            K_STAGE2,
+            E0,
+            E1,
+            H,
+            elapsed
+        )
+
+
+    E1_stage2 = np.asarray(
+        E1_stage2
+    )
+
+    H_stage2 = np.asarray(
+        H_stage2
+    )
+
+    time_stage2 = np.asarray(
+        time_stage2
+    )
+
+
+    # ========================================================
+    # BEST STAGE-2 POINT
+    # ========================================================
+
+    best2, left2, right2 = (
+        interval_around_best(
+            E0_stage2,
+            H_stage2
+        )
+    )
+
+
+    print()
+    print(
+        "--------------------------------------------------------"
+    )
+    print(
+        "BEST STAGE-2 POINT"
+    )
+    print(
+        "--------------------------------------------------------"
+    )
+
+    print(
+        f"E0 = "
+        f"{E0_stage2[best2]:+.12f}"
+    )
+
+    print(
+        f"E1 = "
+        f"{E1_stage2[best2]:+.12f}"
+    )
+
+    print(
+        f"H  = "
+        f"{H_stage2[best2]:.12f}"
+    )
+
+    print()
+
+    print(
+        "Stage-3 search interval:"
+    )
+
+    print(
+        f"[{left2:+.12f}, "
+        f"{right2:+.12f}]"
+    )
+
+    print(
+        "--------------------------------------------------------"
+    )
+
+    print()
+
+
+    # ########################################################
+    #
+    # STAGE 3
+    #
+    # 3 POINTS
+    # k = 16
+    #
+    # ########################################################
+
+
+    E0_stage3 = np.linspace(
+        left2,
+        right2,
+        N_STAGE3
+    )
+
+    E1_stage3 = []
+    H_stage3 = []
+    time_stage3 = []
+
+
+    print()
+    print(
+        "========================================================"
+    )
+    print(
+        "STAGE 3"
+    )
+    print(
+        "========================================================"
+    )
+
+    print(
+        f"k = {K_STAGE3}"
+    )
+
+    print(
+        f"number of points = "
+        f"{N_STAGE3}"
+    )
+
+    print(
+        "========================================================"
+    )
+
+    print()
+
+
+    for i, E0 in enumerate(
+            E0_stage3):
+
+
+        E1, H, elapsed = solve_point(
+            E0,
+            omega,
+            Delta,
+            K_STAGE3
+        )
+
+
+        E1_stage3.append(
+            E1
+        )
+
+        H_stage3.append(
+            H
+        )
+
+        time_stage3.append(
+            elapsed
+        )
+
+
+        print(
+            f"[Stage 3: "
+            f"{i+1:02d}/{N_STAGE3:02d}]"
+        )
+
+        print(
+            f"    E0 = {E0:+.12f}"
+        )
+
+        print(
+            f"    E1 = {E1:+.12f}"
+        )
+
+        print(
+            f"    H  = {H:.12f}"
+        )
+
+        print(
+            f"    time = {elapsed:.1f} s"
+        )
+
+        print()
+
+
+        save_result(
+            output_csv,
+            3,
+            K_STAGE3,
+            E0,
+            E1,
+            H,
+            elapsed
+        )
+
+
+    E1_stage3 = np.asarray(
+        E1_stage3
+    )
+
+    H_stage3 = np.asarray(
+        H_stage3
+    )
+
+    time_stage3 = np.asarray(
+        time_stage3
+    )
+
+
+    # ========================================================
+    # FINAL OPTIMUM
+    # ========================================================
+
+    valid = np.isfinite(
+        H_stage3
+    )
+
+    if not np.any(valid):
+
+        raise RuntimeError(
+            "Every Stage-3 optimization failed."
+        )
+
+
+    valid_indices = np.where(
+        valid
+    )[0]
+
+
+    best3 = valid_indices[
+        np.argmax(
+            H_stage3[valid]
+        )
+    ]
+
+
+    E0_opt = E0_stage3[
+        best3
+    ]
+
+    E1_opt = E1_stage3[
+        best3
+    ]
+
+    H_opt = H_stage3[
+        best3
+    ]
+
+
+    # ========================================================
+    # FINAL OUTPUT
+    # ========================================================
+
+    print()
+    print()
+    print(
+        "========================================================"
+    )
+    print(
+        "FINAL RESULT"
+    )
+    print(
+        "========================================================"
+    )
+
+    print(
+        f"omega = "
+        f"{omega:.12f}"
+    )
+
+    print()
+
+    print(
+        f"E0* = "
+        f"{E0_opt:+.12f}"
+    )
+
+    print(
+        f"E1* = "
+        f"{E1_opt:+.12f}"
+    )
+
+    print()
+
+    print(
+        f"H*  = "
+        f"{H_opt:.12f}"
+    )
+
+    print(
+        "========================================================"
+    )
+
+    print()
+
+    print(
+        "Results saved to:"
+    )
+
+    print(
+        output_csv
+    )
+
+    print()
+
+
+    # ========================================================
+    # RETURN EVERYTHING
+    # ========================================================
+
+    return {
+
+        "omega":
+            omega,
+
+        "Delta":
+            Delta,
+
+        "E0_opt":
+            E0_opt,
+
+        "E1_opt":
+            E1_opt,
+
+        "H_opt":
+            H_opt,
+
+
+        # Stage 1
+        "stage1_E0":
+            E0_stage1,
+
+        "stage1_E1":
+            E1_stage1,
+
+        "stage1_H":
+            H_stage1,
+
+        "stage1_time":
+            time_stage1,
+
+
+        # Stage 2
+        "stage2_E0":
+            E0_stage2,
+
+        "stage2_E1":
+            E1_stage2,
+
+        "stage2_H":
+            H_stage2,
+
+        "stage2_time":
+            time_stage2,
+
+
+        # Stage 3
+        "stage3_E0":
+            E0_stage3,
+
+        "stage3_E1":
+            E1_stage3,
+
+        "stage3_H":
+            H_stage3,
+
+        "stage3_time":
+            time_stage3,
+
+
+        "output_csv":
+            output_csv
+    }
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    # --------------------------------------------------------
+    # Set the omega you want here
+    # --------------------------------------------------------
+    N_omega = 20
+    omega_values = np.linspace(0.31, 0.50, N_omega)
+    omega = omega_values[0]
+
+
+    result = optimize_quantum_vn_fixed_omega(
+        omega=omega
+    )
+
+
+    # --------------------------------------------------------
+    # Convenient variables available after completion
+    # --------------------------------------------------------
+
+    print()
+    print("Convenient final values:")
+    print(
+        "E0_opt =",
+        result["E0_opt"]
+    )
+
+    print(
+        "E1_opt =",
+        result["E1_opt"]
+    )
+
+    print(
+        "H_opt  =",
+        result["H_opt"]
+    )
+
+
+
+
+
+
+
+    
+
+   
