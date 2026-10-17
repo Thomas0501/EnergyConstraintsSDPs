@@ -1,6 +1,6 @@
 ## Requires "build_vn_quantum_solver" to be stored in "vNEntropy_Quantum_EnergyConstraints"
 
-## Generates Quantum vN bounds for Fig6  
+## Generates Quantum vN bounds used for Fig6  
 # Searches for optimal (E_0,E_1) along the boundary using 3 stages of increasing precision
 
 
