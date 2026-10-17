@@ -1,0 +1,960 @@
+## Requires build_vn_classical_solver to be stored in the file "vNEntropyEnergyConstraintsClassicalAdversary" and 
+# "build_vn_quantum_solver" to be stored in "vNEntropy_Quantum_EnergyConstraints"
+
+## Generates Fig3b  
+
+## For a faster speed-up:
+# We first check if the point lies in the `classical' set (https://arxiv.org/abs/1612.06828). 
+# If yes, then we trivially bound the quantum vN entropy by 0. 
+
+# Furthermore, we compute the classical vN bound. If the classical bound is leq 0.003, 
+# we trivially lower bound the the quantum vN entropy by 0. 
+
+## Choices (E_0,E_1) close to the boundary are bound by setting k=16 for a tighter bound on regions we expect to yield high entropy. 
+# Otherwise, we use k=12
+
+## For the classical bounds, replace "build_vn_quantum_solver" with "build_vn_classical_solver"
+
+
+# =============================================================
+# IMPORT SOLVERS
+# =============================================================
+
+from vNEntropyEnergyConstraintsClassicalAdversary import \
+    build_vn_classical_solver
+
+from vNEntropy_Quantum_EnergyConstraints import \
+    build_vn_quantum_solver
+
+
+# =============================================================
+# GENERATE FIGURE 3 DATA
+# =============================================================
+
+def generate_figure3_data(
+        omega0=0.05,
+        omega1=0.05,
+
+        # Quantum entropy discretization
+        k_outer=16,
+        k_inner=12,
+
+        # Classical pre-screen discretization
+        k_classical=16,
+
+        # Spatial sampling
+        Ns=4,
+        Nm=12,
+        boundary_power=3,
+
+        # If classical lower bound is tiny,
+        # use trivial quantum lower bound H=0
+        classical_cutoff=0.003,
+
+        output_file="Figure3_Quantum_Hybrid.mat"
+    ):
+
+
+    # =========================================================
+    # WIDTH OF QUANTUM SET
+    #
+    # theta_x = arcsin(E_x)
+    #
+    # |theta0 - theta1| <= Delta
+    # =========================================================
+
+    Delta = 2 * (
+        np.arcsin(np.sqrt(omega0))
+        +
+        np.arcsin(np.sqrt(omega1))
+    )
+
+
+    # =========================================================
+    # CONSTRUCT SAMPLING POINTS
+    #
+    # columns:
+    #
+    # 0 : E0
+    # 1 : E1
+    # 2 : s
+    # 3 : d
+    # 4 : m
+    # 5 : radial index j
+    # 6 : quantum k used at this point
+    # =========================================================
+
+    points = []
+
+    for j in range(Ns + 1):
+
+        # -----------------------------------------------------
+        # Radial coordinate
+        #
+        # s ~ 0 : close to outer quantum boundary
+        # s = 1 : diagonal E0 = E1
+        # -----------------------------------------------------
+
+        eps_boundary = 1e-5
+
+        s = (
+            eps_boundary
+            +
+            (1.0 - eps_boundary)
+            *
+            (j / Ns)**boundary_power
+        )
+
+        d_abs = (
+            0.5
+            *
+            Delta
+            *
+            (1.0 - s)
+        )
+
+
+        # -----------------------------------------------------
+        # Choose quantum SDP discretization.
+        #
+        # Outer half of radial layers:
+        # k = 16
+        #
+        # Inner half:
+        # k = 12
+        # -----------------------------------------------------
+
+        if j <= Ns / 2:
+            k_here = k_outer
+        else:
+            k_here = k_inner
+
+
+        # -----------------------------------------------------
+        # Both sides of diagonal.
+        # -----------------------------------------------------
+
+        if d_abs < 1e-14:
+            signs = [1.0]
+        else:
+            signs = [+1.0, -1.0]
+
+
+        for sign in signs:
+
+            d = sign * d_abs
+
+            # theta0 = m-d
+            # theta1 = m+d
+
+            m_max = (
+                np.pi/2
+                -
+                abs(d)
+            )
+
+            theta_margin = 1e-3
+
+            m_allowed = max(
+                m_max - theta_margin,
+                0.0
+            )
+
+
+            # -------------------------------------------------
+            # Chebyshev-Lobatto points along each radial curve.
+            # -------------------------------------------------
+
+            for i in range(Nm + 1):
+
+                m = (
+                    m_allowed
+                    *
+                    np.cos(
+                        np.pi*i/Nm
+                    )
+                )
+
+                theta0 = m - d
+                theta1 = m + d
+
+                E0 = np.sin(theta0)
+                E1 = np.sin(theta1)
+
+                points.append([
+                    E0,
+                    E1,
+                    s,
+                    d,
+                    m,
+                    j,
+                    k_here
+                ])
+
+
+    points = np.asarray(
+        points,
+        dtype=float
+    )
+
+
+    # =========================================================
+    # REMOVE DUPLICATE (E0,E1) POINTS
+    # =========================================================
+
+    rounded_points = np.round(
+        points[:, 0:2],
+        decimals=13
+    )
+
+    _, indices = np.unique(
+        rounded_points,
+        axis=0,
+        return_index=True
+    )
+
+    indices = np.sort(indices)
+
+    points = points[indices]
+
+    Npoints = len(points)
+
+
+    print()
+    print("==============================================")
+    print("SAMPLING SUMMARY")
+    print("==============================================")
+
+    print(
+        "Total plotted points =",
+        Npoints
+    )
+
+
+    # =========================================================
+    # ALLOCATE OUTPUT ARRAYS
+    # =========================================================
+
+    H = np.full(
+        Npoints,
+        np.nan
+    )
+
+    H_classical = np.full(
+        Npoints,
+        np.nan
+    )
+
+
+    # ---------------------------------------------------------
+    # Diagnostic flags
+    # ---------------------------------------------------------
+
+    exact_classical = np.zeros(
+        Npoints,
+        dtype=int
+    )
+
+    screened_by_classical = np.zeros(
+        Npoints,
+        dtype=int
+    )
+
+    solved_quantum_directly = np.zeros(
+        Npoints,
+        dtype=int
+    )
+
+    filled_by_symmetry = np.zeros(
+        Npoints,
+        dtype=int
+    )
+
+
+    # =========================================================
+    # SHORTCUT 1:
+    # EXACT CLASSICAL REGION
+    #
+    # |E0-E1| <= 2(omega0+omega1)
+    #
+    # In this region no randomness can be certified.
+    # =========================================================
+
+    classical_threshold = (
+        2.0
+        *
+        (omega0 + omega1)
+    )
+
+    classical_mask = (
+        np.abs(
+            points[:, 0]
+            -
+            points[:, 1]
+        )
+        <=
+        classical_threshold
+        +
+        1e-12
+    )
+
+    H[classical_mask] = 0.0
+
+    exact_classical[
+        classical_mask
+    ] = 1
+
+
+    print(
+        "Exact classical-set points =",
+        np.sum(classical_mask)
+    )
+
+
+    # =========================================================
+    # SHORTCUT 2:
+    # SIGN SYMMETRY
+    #
+    # H(E0,E1) = H(-E0,-E1)
+    #
+    # Find reflected partner for each point.
+    # =========================================================
+
+    coordinates = points[:, 0:2]
+
+    tree = cKDTree(
+        coordinates
+    )
+
+    mirror_distance, mirror_index = tree.query(
+        -coordinates,
+        k=1
+    )
+
+    mirror_index = mirror_index.astype(
+        int
+    )
+
+    # If no reflected point exists to numerical precision,
+    # mark partner as missing.
+    mirror_index[
+        mirror_distance > 1e-10
+    ] = -1
+
+
+    # =========================================================
+    # COUNT NONCLASSICAL SYMMETRY REPRESENTATIVES
+    #
+    # These are the points which may potentially require
+    # either a classical pre-screen or a quantum solve.
+    # =========================================================
+
+    already_counted = np.zeros(
+        Npoints,
+        dtype=bool
+    )
+
+    representatives = []
+
+    for n in range(Npoints):
+
+        if classical_mask[n]:
+
+            already_counted[n] = True
+            continue
+
+        if already_counted[n]:
+            continue
+
+        representatives.append(n)
+
+        already_counted[n] = True
+
+        partner = mirror_index[n]
+
+        if partner >= 0:
+            already_counted[partner] = True
+
+
+    print(
+        "Nonclassical symmetry representatives =",
+        len(representatives)
+    )
+
+
+    # =========================================================
+    # ESTIMATE MAXIMUM POSSIBLE QUANTUM SOLVES
+    #
+    # Actual number will be smaller because the classical
+    # pre-screen can eliminate more points.
+    # =========================================================
+
+    N_k_outer_candidates = 0
+    N_k_inner_candidates = 0
+
+    for n in representatives:
+
+        k_here = int(
+            points[n, 6]
+        )
+
+        if k_here == k_outer:
+            N_k_outer_candidates += 1
+
+        elif k_here == k_inner:
+            N_k_inner_candidates += 1
+
+
+    print(
+        f"Maximum possible k={k_outer} quantum solves =",
+        N_k_outer_candidates
+    )
+
+    print(
+        f"Maximum possible k={k_inner} quantum solves =",
+        N_k_inner_candidates
+    )
+
+
+    # =========================================================
+    # MAIN LOOP
+    #
+    # Logic:
+    #
+    # 1. exact classical set -> H=0
+    # 2. mirror already known -> copy
+    # 3. run classical vN solver
+    # 4. if classical LB < cutoff -> H=0
+    # 5. otherwise run expensive quantum solver
+    # =========================================================
+
+    start_time = time.time()
+
+    N_classical_prescreens = 0
+    N_quantum_solves = 0
+
+    N_quantum_outer = 0
+    N_quantum_inner = 0
+
+
+    for n in range(Npoints):
+
+        # -----------------------------------------------------
+        # Already known:
+        #
+        # - exact classical point
+        # - point previously filled from its symmetry partner
+        # -----------------------------------------------------
+
+        if np.isfinite(H[n]):
+            continue
+
+
+        E0 = points[n, 0]
+        E1 = points[n, 1]
+
+        s = points[n, 2]
+
+        radial_index = int(
+            points[n, 5]
+        )
+
+        k_here = int(
+            points[n, 6]
+        )
+
+        partner = mirror_index[n]
+
+
+        # =====================================================
+        # COPY FROM SIGN-FLIPPED PARTNER
+        # =====================================================
+
+        if (
+            partner >= 0
+            and
+            np.isfinite(H[partner])
+        ):
+
+            H[n] = H[partner]
+
+            H_classical[n] = (
+                H_classical[partner]
+            )
+
+            filled_by_symmetry[n] = 1
+
+            screened_by_classical[n] = (
+                screened_by_classical[
+                    partner
+                ]
+            )
+
+            continue
+
+
+        E = [
+            E0,
+            E1
+        ]
+
+        w = [
+            omega0,
+            omega1
+        ]
+
+
+        try:
+
+            # =================================================
+            # SHORTCUT 3:
+            # CHEAP CLASSICAL VON NEUMANN PRE-SCREEN
+            # =================================================
+
+            Hc = build_vn_classical_solver(
+                E,
+                w,
+                k_classical
+            )
+
+            Hc = float(Hc)
+
+            H_classical[n] = Hc
+
+            N_classical_prescreens += 1
+
+
+            # -------------------------------------------------
+            # Fill classical value for mirror partner too.
+            # -------------------------------------------------
+
+            if partner >= 0:
+
+                H_classical[
+                    partner
+                ] = Hc
+
+
+            # =================================================
+            # If classical lower bound is already tiny,
+            # do not run the expensive quantum SDP.
+            #
+            # Instead use the universally valid trivial bound
+            #
+            # H_quantum >= 0.
+            # =================================================
+
+            if Hc < classical_cutoff:
+
+                H_value = 0.0
+
+                H[n] = H_value
+
+                screened_by_classical[
+                    n
+                ] = 1
+
+
+                if partner >= 0:
+
+                    H[partner] = H_value
+
+                    screened_by_classical[
+                        partner
+                    ] = 1
+
+                    filled_by_symmetry[
+                        partner
+                    ] = 1
+
+
+                print(
+                    f"SCREENED   "
+                    f"E0={E0:+.6f}   "
+                    f"E1={E1:+.6f}   "
+                    f"Hclass={Hc:.6f}   "
+                    f"-> Hquantum=0"
+                )
+
+                continue
+
+
+            # =================================================
+            # SHORTCUT 4:
+            # EXPENSIVE QUANTUM SDP
+            #
+            # k=16 near outer quantum boundary
+            # k=12 toward interior
+            # =================================================
+
+            H_value = build_vn_quantum_solver(
+                E,
+                w,
+                k_here
+            )
+
+            H_value = float(
+                H_value
+            )
+
+            # Numerical protection.
+            H_value = max(
+                H_value,
+                0.0
+            )
+
+            H[n] = H_value
+
+            solved_quantum_directly[
+                n
+            ] = 1
+
+            N_quantum_solves += 1
+
+
+            if k_here == k_outer:
+                N_quantum_outer += 1
+
+            elif k_here == k_inner:
+                N_quantum_inner += 1
+
+
+            # -------------------------------------------------
+            # Fill reflected point for free.
+            # -------------------------------------------------
+
+            if partner >= 0:
+
+                H[partner] = H_value
+
+                filled_by_symmetry[
+                    partner
+                ] = 1
+
+
+            # =================================================
+            # PROGRESS REPORT
+            # =================================================
+
+            elapsed = (
+                time.time()
+                -
+                start_time
+            )
+
+            print(
+                f"QUANTUM #{N_quantum_solves:3d}   "
+                f"k={k_here:2d}   "
+                f"j={radial_index:2d}   "
+                f"s={s:.5f}   "
+                f"E0={E0:+.6f}   "
+                f"E1={E1:+.6f}   "
+                f"Hclass={Hc:.6f}   "
+                f"Hquantum={H_value:.6f}   "
+                f"elapsed={elapsed/60:.1f} min"
+            )
+
+
+        except Exception as error:
+
+            print()
+            print("==========================================")
+            print("SOLVER FAILED")
+            print("==========================================")
+
+            print(
+                "E0 =",
+                E0
+            )
+
+            print(
+                "E1 =",
+                E1
+            )
+
+            print(
+                "radial j =",
+                radial_index
+            )
+
+            print(
+                "s =",
+                s
+            )
+
+            print(
+                "quantum k =",
+                k_here
+            )
+
+            print(
+                "error =",
+                error
+            )
+
+            H[n] = np.nan
+
+
+    # =========================================================
+    # EXTRACT COORDINATE ARRAYS
+    # =========================================================
+
+    E0_data = points[:, 0]
+    E1_data = points[:, 1]
+
+    s_data = points[:, 2]
+    d_data = points[:, 3]
+    m_data = points[:, 4]
+
+    j_data = points[:, 5].astype(
+        int
+    )
+
+    k_data = points[:, 6].astype(
+        int
+    )
+
+
+    # =========================================================
+    # FINAL SUMMARY
+    # =========================================================
+
+    total_time = (
+        time.time()
+        -
+        start_time
+    )
+
+    print()
+    print("==============================================")
+    print("FINAL COMPUTATION SUMMARY")
+    print("==============================================")
+
+    print(
+        "Total plotted points =",
+        Npoints
+    )
+
+    print(
+        "Exact classical-set points =",
+        np.sum(exact_classical)
+    )
+
+    print(
+        "Classical pre-screen calls =",
+        N_classical_prescreens
+    )
+
+    print(
+        "Screened by classical cutoff =",
+        np.sum(
+            screened_by_classical
+        ) // 2
+        if np.any(
+            screened_by_classical
+        )
+        else 0
+    )
+
+    print(
+        "Direct expensive quantum solves =",
+        N_quantum_solves
+    )
+
+    print(
+        f"Direct k={k_outer} solves =",
+        N_quantum_outer
+    )
+
+    print(
+        f"Direct k={k_inner} solves =",
+        N_quantum_inner
+    )
+
+    print(
+        "Points filled by symmetry =",
+        np.sum(
+            filled_by_symmetry
+        )
+    )
+
+    print(
+        "Total elapsed time =",
+        total_time/3600,
+        "hours"
+    )
+
+
+    # =========================================================
+    # SAVE MATLAB FILE
+    # =========================================================
+
+    savemat(
+        output_file,
+        {
+            # -----------------------------------------------
+            # Coordinates
+            # -----------------------------------------------
+
+            "E0": E0_data,
+            "E1": E1_data,
+
+            "s": s_data,
+            "d": d_data,
+            "m": m_data,
+
+            "j": j_data,
+
+
+            # -----------------------------------------------
+            # Entropies
+            # -----------------------------------------------
+
+            "H": H,
+
+            "H_classical":
+                H_classical,
+
+
+            # -----------------------------------------------
+            # Which quantum discretization was assigned
+            # -----------------------------------------------
+
+            "k_used":
+                k_data,
+
+
+            # -----------------------------------------------
+            # Diagnostic flags
+            # -----------------------------------------------
+
+            "exact_classical":
+                exact_classical,
+
+            "screened_by_classical":
+                screened_by_classical,
+
+            "solved_quantum_directly":
+                solved_quantum_directly,
+
+            "filled_by_symmetry":
+                filled_by_symmetry,
+
+
+            # -----------------------------------------------
+            # Parameters
+            # -----------------------------------------------
+
+            "omega0": omega0,
+            "omega1": omega1,
+
+            "Delta": Delta,
+
+            "Ns": Ns,
+            "Nm": Nm,
+
+            "boundary_power":
+                boundary_power,
+
+            "k_outer":
+                k_outer,
+
+            "k_inner":
+                k_inner,
+
+            "k_classical":
+                k_classical,
+
+            "classical_cutoff":
+                classical_cutoff,
+
+
+            # -----------------------------------------------
+            # Summary information
+            # -----------------------------------------------
+
+            "Npoints":
+                Npoints,
+
+            "N_quantum_solves":
+                N_quantum_solves,
+
+            "N_quantum_outer":
+                N_quantum_outer,
+
+            "N_quantum_inner":
+                N_quantum_inner,
+
+            "N_classical_prescreens":
+                N_classical_prescreens,
+
+            "total_time_seconds":
+                total_time
+        }
+    )
+
+
+    print()
+    print("Saved data to:")
+    print(output_file)
+
+
+    return (
+        E0_data,
+        E1_data,
+        H
+    )
+
+
+# =============================================================
+# RUN
+# =============================================================
+
+if __name__ == "__main__":
+
+    E0, E1, H = generate_figure3_data(
+
+        omega0=0.05,
+        omega1=0.05,
+
+
+        # =====================================================
+        # Spatial sampling
+        # =====================================================
+
+        Ns=8,
+        Nm=24,
+
+        boundary_power=3,
+
+
+        # =====================================================
+        # Quantum SDP accuracy
+        #
+        # Outer radial half:
+        # k = 16
+        #
+        # Inner radial half:
+        # k = 12
+        # =====================================================
+
+        k_outer=16,
+        k_inner=12,
+
+
+        # =====================================================
+        # Cheap classical pre-screen
+        # =====================================================
+
+        k_classical=8,
+
+        classical_cutoff=0.003,
+
+
+        # =====================================================
+        # MATLAB output
+        # =====================================================
+
+        output_file=
+            "Figure3_Quantum_Hybrid_Screened.mat"
+    )
