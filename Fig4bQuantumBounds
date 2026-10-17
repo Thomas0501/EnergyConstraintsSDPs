@@ -1,7 +1,7 @@
 ## Requires build_vn_classical_solver to be stored in the file "vNEntropyEnergyConstraintsClassicalAdversary" and 
 # "build_vn_quantum_solver" to be stored in "vNEntropy_Quantum_EnergyConstraints"
 
-## Generates Fig3b  
+## Generates Fig4b  
 
 ## For a faster speed-up:
 # We first check if the point lies in the `classical' set (https://arxiv.org/abs/1612.06828). 
