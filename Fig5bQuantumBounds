@@ -1,0 +1,726 @@
+## Requires "build_vn_quantum_solver" to be stored in "vNEntropy_Quantum_EnergyConstraints"
+
+## Generates Fig5b  
+
+## For a faster speed-up:
+# Choices (E_0,E_1) close to the boundary are bound by setting k=16 for a tighter bound on regions we expect to yield high entropy. 
+# Otherwise, we use k=12
+
+## For the classical bounds, replace "build_vn_quantum_solver" with "build_vn_classical_solver"
+
+
+from vNEntropy_Quantum_EnergyConstraints import \
+    build_vn_quantum_solver
+
+
+# ============================================================
+# USER SETTINGS
+# ============================================================
+
+omega0 = 0.05
+omega1 = 0.05
+
+# Fig. 4 zoom window
+E0_MIN = -0.10
+E0_MAX =  0.10
+
+E1_MIN = 0.75
+E1_MAX = 0.85
+
+
+# ============================================================
+# E0 SAMPLING
+#
+# 10 values, explicitly including E0 = 0
+# ============================================================
+
+E0_values = np.array([
+    -0.050,
+    -0.040,
+    -0.025,
+    -0.010,
+     0.000,
+     0.020,
+     0.040,
+     0.060,
+     0.080,
+     0.100
+])
+
+
+# ============================================================
+# SIX DEPTHS
+#
+# fraction = 1.0 : quantum boundary
+# fraction = 0.0 : bottom of Fig. 4 window
+#
+# Outer two depths -> k = 16
+# Inner four depths -> k = 12
+# ============================================================
+
+depth_fractions = np.array([
+    1.0,
+    0.8,
+    0.6,
+    0.4,
+    0.2,
+    0.0
+])
+
+K_OUTER = 16
+K_INNER = 12
+
+# Number of outer depth layers that use k=16
+N_OUTER_DEPTHS = 2
+
+
+# ============================================================
+# OPTIONAL BOUNDARY MARGIN
+#
+# Keep 0.0 to sample the exact Q boundary.
+# If numerical issues occur, try e.g. 1e-6.
+# ============================================================
+
+BOUNDARY_THETA_MARGIN = 0.0
+
+
+# ============================================================
+# OUTPUT FILE
+# ============================================================
+
+output_file = "Figure4_Quantum_Local60.mat"
+
+
+# ============================================================
+# QUANTUM SET WIDTH
+#
+# |asin(E0)-asin(E1)| <= Delta
+# ============================================================
+
+Delta = 2 * (
+    np.arcsin(np.sqrt(omega0))
+    +
+    np.arcsin(np.sqrt(omega1))
+)
+
+print("Delta =", Delta)
+
+
+# ============================================================
+# CONSTRUCT THE 60 POINTS
+# ============================================================
+
+points = []
+
+for depth_index, fraction in enumerate(depth_fractions):
+
+    for E0 in E0_values:
+
+        theta0 = np.arcsin(E0)
+
+
+        # ----------------------------------------------------
+        # Upper quantum boundary:
+        #
+        # theta1 = theta0 + Delta
+        # ----------------------------------------------------
+
+        theta1_quantum = (
+            theta0
+            +
+            Delta
+            -
+            BOUNDARY_THETA_MARGIN
+        )
+
+
+        # ----------------------------------------------------
+        # Upper edge of the Fig. 4 plotting box
+        # ----------------------------------------------------
+
+        theta1_plotmax = np.arcsin(E1_MAX)
+
+
+        # ----------------------------------------------------
+        # Whichever comes first:
+        #
+        # quantum boundary or top of plot window
+        # ----------------------------------------------------
+
+        theta1_upper = min(
+            theta1_quantum,
+            theta1_plotmax
+        )
+
+        E1_upper = np.sin(theta1_upper)
+
+
+        # ----------------------------------------------------
+        # Check that this E0 actually intersects the zoomed
+        # feasible region.
+        # ----------------------------------------------------
+
+        if E1_upper < E1_MIN - 1e-12:
+
+            print(
+                "Skipping E0 outside local feasible region:",
+                E0
+            )
+
+            continue
+
+
+        # ----------------------------------------------------
+        # Depth interpolation
+        #
+        # fraction = 0:
+        #     E1 = E1_MIN
+        #
+        # fraction = 1:
+        #     E1 = quantum boundary
+        # ----------------------------------------------------
+
+        E1 = (
+            E1_MIN
+            +
+            fraction
+            *
+            (E1_upper - E1_MIN)
+        )
+
+
+        # ----------------------------------------------------
+        # Hybrid k choice
+        #
+        # depth indices 0,1:
+        #     k = 16
+        #
+        # depth indices 2,3,4,5:
+        #     k = 12
+        # ----------------------------------------------------
+
+        if depth_index < N_OUTER_DEPTHS:
+            k_here = K_OUTER
+        else:
+            k_here = K_INNER
+
+
+        points.append([
+            E0,
+            E1,
+            fraction,
+            E1_upper,
+            depth_index,
+            k_here
+        ])
+
+
+points = np.asarray(
+    points,
+    dtype=float
+)
+
+Npoints = len(points)
+
+
+# ============================================================
+# SANITY CHECK
+# ============================================================
+
+print()
+print("============================================")
+print("LOCAL FIGURE 4 SAMPLING")
+print("============================================")
+
+print(
+    "Number of points =",
+    Npoints
+)
+
+if Npoints != 60:
+
+    raise RuntimeError(
+        f"Expected exactly 60 points, "
+        f"but generated {Npoints}."
+    )
+
+
+# ============================================================
+# PRINT ALL POINTS BEFORE RUNNING
+# ============================================================
+
+print()
+print("Points that will be evaluated:")
+print()
+
+for n in range(Npoints):
+
+    print(
+        f"{n+1:2d}: "
+        f"E0={points[n,0]:+.6f}   "
+        f"E1={points[n,1]:+.6f}   "
+        f"depth={points[n,2]:.1f}   "
+        f"k={int(points[n,5])}"
+    )
+
+
+# ============================================================
+# OUTPUT ARRAYS
+# ============================================================
+
+H = np.full(
+    Npoints,
+    np.nan
+)
+
+solved = np.zeros(
+    Npoints,
+    dtype=int
+)
+
+solve_time_values = np.full(
+    Npoints,
+    np.nan
+)
+
+
+# ============================================================
+# CHECKPOINT SAVE FUNCTION
+# ============================================================
+
+def save_checkpoint():
+
+    savemat(
+        output_file,
+        {
+            # -----------------------------------------------
+            # Coordinates
+            # -----------------------------------------------
+
+            "E0":
+                points[:,0],
+
+            "E1":
+                points[:,1],
+
+
+            # -----------------------------------------------
+            # Quantum entropy
+            # -----------------------------------------------
+
+            "H":
+                H,
+
+
+            # -----------------------------------------------
+            # Depth information
+            # -----------------------------------------------
+
+            "depth_fraction":
+                points[:,2],
+
+            "E1_quantum_boundary":
+                points[:,3],
+
+            "depth_index":
+                points[:,4].astype(int),
+
+
+            # -----------------------------------------------
+            # SDP resolution used
+            # -----------------------------------------------
+
+            "k_used":
+                points[:,5].astype(int),
+
+
+            # -----------------------------------------------
+            # Diagnostics
+            # -----------------------------------------------
+
+            "solved":
+                solved,
+
+            "solve_time_seconds":
+                solve_time_values,
+
+
+            # -----------------------------------------------
+            # Parameters
+            # -----------------------------------------------
+
+            "omega0":
+                omega0,
+
+            "omega1":
+                omega1,
+
+            "Delta":
+                Delta,
+
+            "E0_plot_min":
+                E0_MIN,
+
+            "E0_plot_max":
+                E0_MAX,
+
+            "E1_plot_min":
+                E1_MIN,
+
+            "E1_plot_max":
+                E1_MAX,
+
+            "K_outer":
+                K_OUTER,
+
+            "K_inner":
+                K_INNER,
+
+            "N_outer_depths":
+                N_OUTER_DEPTHS,
+
+            "Npoints":
+                Npoints
+        }
+    )
+
+
+# ============================================================
+# SAVE COORDINATES IMMEDIATELY
+#
+# So the file exists even before the first SDP finishes.
+# ============================================================
+
+save_checkpoint()
+
+
+# ============================================================
+# SOLVE ALL 60 POINTS
+# ============================================================
+
+start_time = time.time()
+
+completed_times = []
+
+
+for n in range(Npoints):
+
+    E0 = points[n,0]
+    E1 = points[n,1]
+
+    fraction = points[n,2]
+
+    depth_index = int(
+        points[n,4]
+    )
+
+    k_here = int(
+        points[n,5]
+    )
+
+
+    E = [
+        E0,
+        E1
+    ]
+
+    w = [
+        omega0,
+        omega1
+    ]
+
+
+    print()
+    print("============================================")
+    print(
+        f"POINT {n+1}/{Npoints}"
+    )
+    print("============================================")
+
+    print(
+        f"E0 = {E0:+.12f}"
+    )
+
+    print(
+        f"E1 = {E1:+.12f}"
+    )
+
+    print(
+        f"depth fraction = {fraction:.2f}"
+    )
+
+    print(
+        f"depth index = {depth_index}"
+    )
+
+    print(
+        f"k = {k_here}"
+    )
+
+
+    point_start = time.time()
+
+
+    try:
+
+        H_value = build_vn_quantum_solver(
+            E,
+            w,
+            k_here
+        )
+
+        H_value = float(
+            H_value
+        )
+
+        # ----------------------------------------------------
+        # Numerical safeguard
+        #
+        # Conditional entropy is nonnegative.
+        # ----------------------------------------------------
+
+        H_value = max(
+            H_value,
+            0.0
+        )
+
+        H[n] = H_value
+
+        solved[n] = 1
+
+
+    except Exception as error:
+
+        print()
+        print("SOLVER FAILED")
+        print(error)
+
+        H[n] = np.nan
+
+
+    # ========================================================
+    # TIMING
+    # ========================================================
+
+    point_time = (
+        time.time()
+        -
+        point_start
+    )
+
+    solve_time_values[n] = point_time
+
+    completed_times.append(
+        point_time
+    )
+
+    elapsed = (
+        time.time()
+        -
+        start_time
+    )
+
+
+    # --------------------------------------------------------
+    # Better remaining-time estimate:
+    #
+    # Use measured average separately for k=16 and k=12
+    # whenever possible.
+    # --------------------------------------------------------
+
+    completed_k16 = (
+        (points[:n+1,5] == K_OUTER)
+        &
+        np.isfinite(
+            solve_time_values[:n+1]
+        )
+    )
+
+    completed_k12 = (
+        (points[:n+1,5] == K_INNER)
+        &
+        np.isfinite(
+            solve_time_values[:n+1]
+        )
+    )
+
+
+    if np.any(completed_k16):
+
+        mean_k16 = np.mean(
+            solve_time_values[:n+1][
+                completed_k16
+            ]
+        )
+
+    else:
+
+        # Your measured runtime estimate
+        mean_k16 = 180.31
+
+
+    if np.any(completed_k12):
+
+        mean_k12 = np.mean(
+            solve_time_values[:n+1][
+                completed_k12
+            ]
+        )
+
+    else:
+
+        # Your measured runtime estimate
+        mean_k12 = 58.83
+
+
+    remaining_points = points[n+1:,5]
+
+
+    remaining_k16 = np.sum(
+        remaining_points
+        ==
+        K_OUTER
+    )
+
+    remaining_k12 = np.sum(
+        remaining_points
+        ==
+        K_INNER
+    )
+
+
+    remaining_seconds = (
+        remaining_k16
+        *
+        mean_k16
+        +
+        remaining_k12
+        *
+        mean_k12
+    )
+
+
+    # ========================================================
+    # PROGRESS OUTPUT
+    # ========================================================
+
+    print()
+    print(
+        f"H = {H[n]:.10f}"
+    )
+
+    print(
+        f"This point took "
+        f"{point_time:.1f} s"
+    )
+
+    print(
+        f"Elapsed = "
+        f"{elapsed/60:.1f} min"
+    )
+
+    print(
+        f"Remaining:"
+        f" {remaining_k16} k=16 points,"
+        f" {remaining_k12} k=12 points"
+    )
+
+    print(
+        f"Estimated remaining = "
+        f"{remaining_seconds/60:.1f} min"
+    )
+
+
+    # ========================================================
+    # SAVE CHECKPOINT AFTER EVERY POINT
+    # ========================================================
+
+    save_checkpoint()
+
+    print(
+        "Checkpoint saved."
+    )
+
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+
+total_time = (
+    time.time()
+    -
+    start_time
+)
+
+
+print()
+print("============================================")
+print("FINISHED FIGURE 4 LOCAL DATA")
+print("============================================")
+
+print(
+    "Successful points =",
+    np.sum(solved)
+)
+
+print(
+    "Total points =",
+    Npoints
+)
+
+print(
+    "k=16 points =",
+    np.sum(
+        points[:,5]
+        ==
+        K_OUTER
+    )
+)
+
+print(
+    "k=12 points =",
+    np.sum(
+        points[:,5]
+        ==
+        K_INNER
+    )
+)
+
+print(
+    "Total runtime =",
+    total_time/60,
+    "minutes"
+)
+
+print()
+print("Saved to:")
+print(output_file)
+
+
+# ============================================================
+# DISPLAY E0 = 0 POINTS
+# ============================================================
+
+zero_indices = np.where(
+    np.isclose(
+        points[:,0],
+        0.0,
+        atol=1e-14
+    )
+)[0]
+
+
+print()
+print("============================================")
+print("E0 = 0 POINTS")
+print("============================================")
+
+for idx in zero_indices:
+
+    print(
+        f"E0={points[idx,0]:+.12f}   "
+        f"E1={points[idx,1]:+.12f}   "
+        f"depth={points[idx,2]:.2f}   "
+        f"k={int(points[idx,5])}   "
+        f"H={H[idx]:.10f}"
+    )
