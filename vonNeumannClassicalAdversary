@@ -1,0 +1,202 @@
+# Python Code: Solution to Primal Problem of von Neumann entropy SDP (https://arxiv.org/pdf/1905.09117)
+
+# Import packages.
+import cvxpy as cp
+import numpy as np
+from scipy.stats import entropy
+
+k = 16                     #  Number of line segments used to approximate the function H(E)
+w_peak = 1                #  Max peak assumption. If not utilized, simply set it to 1
+E = [0,1]                 #  Measured correlations
+w = [0.15,0.15]                 #  Assumed max-averages (energy-constraint assumption)
+
+def build_vn_classical_solver(E,w,k):
+    ## Parameters
+    #k = 16                     #  Number of line segments used to approximate the function H(E)
+    w_peak = 1                #  Max peak assumption. If not utilized, simply set it to 1
+    #E = [0,1]                 #  Measured correlations
+    #w = [0.15,0.15]                 #  Assumed max-averages (energy-constraint assumption)
+    p_x0 = 1                        # Prob of chossing setting x=0
+
+    ## Setting up variables for SDP
+    Problambda = cp.Variable(k)               #  These are the Pr(lambda) where we can assume there are at most k different ones
+    Etildelambda = cp.Variable((k,2))         #  Renormalized Pr(lambda)*E^lambda
+    omegatildelambda = cp.Variable((k,2))     #  Renormalized Pr(lambda)*omega^lambda
+    
+    # Extra Variables for describing quantum behaviors
+    X = []                                  #  PSD matrix for each k...we will later constrain it to be PSD
+    for i in range(k):
+       X.append(cp.Variable((4,4), symmetric=True))
+    
+    tildeu = cp.Variable(k)
+    tildev = cp.Variable(k)
+    tildeeta = cp.Variable((k,2))
+    
+    
+    ## Constraints
+    constraints = []
+    constraints += [X[i]>>0 for i in range(k)]
+    
+    # Relate entries of X to other variables
+    A_11 = np.zeros((4,4))
+    A_11[0][0] = 1
+    
+    A_21 = np.zeros((4,4))
+    A_21[1][0] = 1
+    
+    A_31 = np.zeros((4,4))
+    A_31[2][0] = 1
+    
+    A_41 = np.zeros((4,4))
+    A_41[3][0] = 1
+    
+    A_22 = np.zeros((4,4))
+    A_22[1][1] = 1
+    
+    A_32 = np.zeros((4,4))
+    A_32[2][1] = 1
+    
+    A_42 = np.zeros((4,4))
+    A_42[3][1] = 1
+    
+    A_33 = np.zeros((4,4))
+    A_33[2][2] = 1
+    
+    A_43 = np.zeros((4,4))
+    A_43[3][2] = 1
+    
+    A_44 = np.zeros((4,4))
+    A_44[3][3] = 1
+    
+    constraints += [
+       cp.trace(A_11 @ X[i]) == Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_21 @ X[i]) == tildeu[i] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_31 @ X[i]) == Etildelambda[i][0] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_41 @ X[i]) == 2*tildeeta[i][0]-Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_22 @ X[i]) == Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_32 @ X[i]) == Etildelambda[i][1] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_42 @ X[i]) == 2*tildeeta[i][1]-Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_33 @ X[i]) == Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_43 @ X[i]) == tildev[i] for i in range(k)
+    ]
+    constraints += [
+       cp.trace(A_44 @ X[i]) == Problambda[i] for i in range(k)
+    ]
+    
+    # Constraints on Pr(lambda), Pr(lambda)*E^lambda, Pr(lambda)*omega^lambda, tildeeta
+    constraints += [                                # Constraints on Pr(lambda)
+       Problambda[i] >= 0 for i in range(k)
+    ]
+    constraints += [
+       cp.sum(Problambda) == 1
+    ]
+    
+    
+    constraints += [                                # Constraints on Pr(lambda)*E^lambda
+       Etildelambda[i][0] <= Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       Etildelambda[i][1] <= Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       Etildelambda[i][0] >= -Problambda[i] for i in range(k)
+    ]
+    constraints += [
+       Etildelambda[i][1] >= -Problambda[i] for i in range(k)
+    ]
+    
+    
+    constraints += [                                # Constraints on Pr(lambda)*omega^lambda
+       omegatildelambda[i][0] >= 0 for i in range(k)
+    ]
+    constraints += [
+       omegatildelambda[i][1] >= 0 for i in range(k)
+    ]
+    constraints += [                               
+       omegatildelambda[i][0] <= Problambda[i]*w_peak for i in range(k)
+    ]
+    constraints += [
+       omegatildelambda[i][1] <= Problambda[i]*w_peak for i in range(k)
+    ]
+    
+    
+    constraints += [                                # Constraints on tildeeta
+       omegatildelambda[i][0] >= tildeeta[i][0] for i in range(k)
+    ]
+    constraints += [
+       omegatildelambda[i][1] >= tildeeta[i][1] for i in range(k)
+    ]
+    
+    # Constraints on Averages
+    
+    constraints += [                                
+       cp.sum(Etildelambda[:,[i]]) == E[i] for i in range(2)
+    ]
+    
+    constraints += [                                
+       cp.sum(omegatildelambda[:,[i]]) == w[i] for i in range(2)
+    ]
+    
+    ## Objective Function
+    
+    # Generate H(E) for an array of -1 <= E <= 1
+    E_values = np.linspace(-1,1,k+1)
+    
+    base = 2  # work in units of bits
+    HE_values = []
+    for i in range(k+1):
+       pk = np.array([(1+E_values[i])/2, (1-E_values[i])/2])  
+       HE_values.append(entropy(pk, base=base))
+    
+    
+    #Generate k line segments: f_i(E) = a_i + b_i*E
+    A = np.zeros(k)
+    B = np.zeros(k)
+    
+    for i in range(k):
+       B[i] = (HE_values[i+1]-HE_values[i])/(E_values[i+1]-E_values[i])
+    
+    for i in range(k):
+       A[i] = HE_values[i] - B[i]*E_values[i]
+    
+    # Objective Function
+    obj = 0
+    for i in range(k):
+        obj += p_x0*A[i]*Problambda[i] + p_x0*B[i]*Etildelambda[i][0]
+    
+    
+    prob = cp.Problem(cp.Minimize(obj),
+                     constraints)
+    prob.solve(verbose=False)
+    
+    # Print result.
+    #print("The optimal value is", prob.value)
+    #print("A solution Etildelambda is")
+    #print(Etildelambda.value)
+    #print("A solution Problambda is")
+    #print(Problambda.value)
+    #print("A solution omegatildelambda is")
+    #print(omegatildelambda.value)
+    
+
+    return prob.value
+
+
+
+
